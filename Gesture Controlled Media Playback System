@@ -1,0 +1,149 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import pyautogui
+import platform
+import tkinter as tk
+from tkinter import Label
+from collections import deque
+import time
+import os
+
+# Check the operating system
+is_windows = platform.system() == "Windows"
+is_macos = platform.system() == "Darwin"
+
+if is_windows:
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+# Initialize Mediapipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7, min_tracking_confidence=0.7)
+mp_drawing = mp.solutions.drawing_utils
+
+# Initialize smoothing buffer for volume
+buffer_size = 10
+dist_buffer = deque(maxlen=buffer_size)
+
+# System volume control setup for Windows
+if is_windows:
+    devices = AudioUtilities.GetSpeakers()
+    interface = devices.Activate(IAudioEndpointVolume.iid, CLSCTX_ALL, None)  # Corrected interface call
+    volume = interface.QueryInterface(IAudioEndpointVolume)
+
+# Function to set the system volume
+def set_system_volume(vol):
+    if is_windows:
+        # Map volume to system's scale (0.0 to 1.0)
+        vol = max(0.0, min(vol, 1.0))  # Clamp between 0 and 1
+        volume.SetMasterVolumeLevelScalar(vol, None)
+    elif is_macos:
+        # Use osascript to set the volume
+        scaled_vol = int(vol * 100)  # Scale to 0-100
+        os.system(f"osascript -e 'set volume output volume {scaled_vol}'")
+
+# Function to get hand landmarks
+def get_hand_landmarks(image):
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    result = hands.process(image_rgb)
+    if result.multi_hand_landmarks:
+        for hand_landmark in result.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(image, hand_landmark, mp_hands.HAND_CONNECTIONS)
+        return result.multi_hand_landmarks[0]
+    return None
+
+# Function to calculate distance between two landmarks
+def calculate_distance(landmarks, idx1, idx2):
+    x1, y1 = landmarks.landmark[idx1].x, landmarks.landmark[idx1].y
+    x2, y2 = landmarks.landmark[idx2].x, landmarks.landmark[idx2].y
+    return np.sqrt((x2 - x1)*2 + (y2 - y1)*2)
+
+# Gesture function mappings
+def play_pause():
+    pyautogui.press("playpause")
+
+def forward():
+    pyautogui.press("right")
+
+def backward():
+    pyautogui.press("left")
+
+# Calibration for gesture detection thresholds
+def calibrate_gestures():
+    print("Calibrating gestures... Hold your hand steady.")
+    time.sleep(3)  # Let the user prepare their hand
+    print("Calibration complete.")
+
+# Function to detect gestures
+def detect_gestures(landmarks):
+    thumb_tip = 4
+    index_tip = 8
+    middle_tip = 12
+    ring_tip = 16
+    pinky_tip = 20
+
+    # Distance between thumb and index for volume control
+    thumb_index_dist = calculate_distance(landmarks, thumb_tip, index_tip)
+
+    # Volume control based on distance between thumb and index
+    dist_buffer.append(thumb_index_dist)
+    smoothed_distance = np.mean(dist_buffer)
+    vol = np.interp(smoothed_distance, [0.02, 0.25], [0, 1])  # Map to 0-1 range
+    set_system_volume(vol)  # Set the system volume
+
+    # Gesture: Thumb + Middle Pinch -> Play/Pause
+    thumb_middle_dist = calculate_distance(landmarks, thumb_tip, middle_tip)
+    if thumb_middle_dist < 0.05:
+        play_pause()
+        time.sleep(0.5)  # Prevent double-triggering
+
+    # Gesture: Thumb + Ring Pinch -> Forward
+    thumb_ring_dist = calculate_distance(landmarks, thumb_tip, ring_tip)
+    if thumb_ring_dist < 0.05:
+        forward()
+        time.sleep(0.5)  # Prevent double-triggering
+
+    # Gesture: Thumb + Pinky Pinch -> Backward
+    thumb_pinky_dist = calculate_distance(landmarks, thumb_tip, pinky_tip)
+    if thumb_pinky_dist < 0.05:
+        backward()
+        time.sleep(0.5)  # Prevent double-triggering
+
+    return vol * 100  # Return percentage volume for display
+
+# Create the GUI with Tkinter
+root = tk.Tk()
+root.title("Hand Gesture Media Control")
+root.geometry("300x100")
+volume_label = Label(root, text="Volume: 50%", font=("Helvetica", 16))
+volume_label.pack(pady=20)
+
+# Main loop for video capture and gesture detection
+cap = cv2.VideoCapture(0)
+
+calibrate_gestures()  # Perform gesture calibration
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame = cv2.flip(frame, 1)
+    landmarks = get_hand_landmarks(frame)
+
+    if landmarks:
+        vol = detect_gestures(landmarks)
+        volume_label.config(text=f"Volume: {int(vol)}%")
+
+    cv2.imshow('Hand Gesture Media Control', frame)
+
+    root.update_idletasks()
+    root.update()
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+root.destroy()
